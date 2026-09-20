@@ -25,7 +25,9 @@ pub struct Metadata {
     pub exit_code: Option<u32>,
     #[serde(default)]
     pub exit_signal: Option<String>,
-    pub complete: bool,
+    pub recording_complete: bool,
+    pub transcript_complete: bool,
+    pub transcript_error: Option<String>,
     pub recording_error: Option<String>,
     pub utf8_replacements: u64,
     pub transcript_version: u32,
@@ -61,11 +63,11 @@ pub fn private_dir(path: &Path) -> Result<()> {
     }
     let mut b = fs::DirBuilder::new();
     b.mode(0o700);
-    match b.create(path) {
-        Ok(()) => (),
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => (),
+    let created = match b.create(path) {
+        Ok(()) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => false,
         Err(e) => return Err(e.into()),
-    }
+    };
     let m = fs::symlink_metadata(path)?;
     if !m.is_dir() || m.file_type().is_symlink() {
         bail!("not a real directory: {}", path.display())
@@ -73,16 +75,29 @@ pub fn private_dir(path: &Path) -> Result<()> {
     if m.uid() != unsafe { libc::geteuid() } {
         bail!("directory is not owned by current user: {}", path.display())
     }
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    if created {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    } else {
+        anyhow::ensure!(m.mode() & 0o077 == 0,
+            "storage directory is accessible by other users: {}\nExpected a private directory owned by the current user.", path.display());
+        anyhow::ensure!(
+            m.mode() & 0o700 == 0o700,
+            "storage directory must be readable, writable and searchable: {}",
+            path.display()
+        );
+    }
     Ok(())
 }
 pub fn new_file(path: &Path) -> Result<File> {
     let mut o = OpenOptions::new();
     o.write(true).create_new(true);
-    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     o.mode(0o600).custom_flags(libc::O_NOFOLLOW);
-    o.open(path)
-        .with_context(|| format!("create {}", path.display()))
+    let file = o
+        .open(path)
+        .with_context(|| format!("create {}", path.display()))?;
+    file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    Ok(file)
 }
 pub fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
     let tmp = path.with_extension(format!("tmp-{}", Uuid::new_v4()));
@@ -142,8 +157,6 @@ pub fn sessions(root: &Path) -> Result<Vec<PathBuf>> {
     }
     let mut result = vec![];
     walk(&root.join("sessions"), 4, &mut result)?;
-    result.sort();
-    result.reverse();
     Ok(result)
 }
 pub fn resolve(root: &Path, id: &str) -> Result<PathBuf> {

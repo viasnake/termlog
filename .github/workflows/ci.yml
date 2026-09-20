@@ -14,3 +14,5 @@ jobs:
       - run: cargo +stable fmt --check
       - run: cargo +stable clippy --locked --all-targets -- -D warnings
       - run: cargo +stable test --locked
+      - run: cargo +stable build --locked
+      - run: python3 tests/pty_integration.py

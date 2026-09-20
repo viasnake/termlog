@@ -1,5 +1,6 @@
 use crate::{
     config::Config,
+    derive_log,
     record::{Event, Writer},
     storage::{self, Extension, Header, Metadata, Term},
     transcript,
@@ -201,7 +202,7 @@ pub fn run(config: &Config, command: Vec<String>, capture: bool) -> Result<u32> 
         let term = env::var("TERM").unwrap_or_else(|_| "xterm-256color".into());
         let sz = size();
         let meta = Metadata {
-            schema_version: 1,
+            schema_version: 2,
             session_id: id.clone(),
             started_at: started,
             ended_at: None,
@@ -215,7 +216,9 @@ pub fn run(config: &Config, command: Vec<String>, capture: bool) -> Result<u32> 
             capture_input: capture,
             exit_code: None,
             exit_signal: None,
-            complete: false,
+            recording_complete: false,
+            transcript_complete: false,
+            transcript_error: None,
             recording_error: None,
             utf8_replacements: 0,
             transcript_version: transcript::VERSION,
@@ -243,11 +246,6 @@ pub fn run(config: &Config, command: Vec<String>, capture: bool) -> Result<u32> 
         let replacements = Arc::new(AtomicU64::new(0));
         let writer = Writer::new(
             storage::new_file(&path.join("events.cast"))?,
-            if config.transcript.enabled {
-                Some(storage::new_file(&path.join("transcript.log"))?)
-            } else {
-                None
-            },
             &header,
             replacements.clone(),
         )?;
@@ -310,6 +308,11 @@ pub fn run(config: &Config, command: Vec<String>, capture: bool) -> Result<u32> 
         }
         result
     });
+    let derived = config
+        .transcript
+        .enabled
+        .then(|| derive_log::Worker::start(&path, interval));
+    let mut transcript_warning = false;
     let mut sender = Some(tx);
     let mut warning = false;
     let mut encoding_warning = false;
@@ -320,6 +323,15 @@ pub fn run(config: &Config, command: Vec<String>, capture: bool) -> Result<u32> 
     let mut eof = false;
     let relay: Result<()> = (|| {
         loop {
+            if derived
+                .as_ref()
+                .is_some_and(|d| d.failed.load(Ordering::Acquire))
+                && !transcript_warning
+            {
+                transcript_warning = true;
+                output.write_all(b"\r\nWARNING: transcript generation failed; cast recording continues. Use termlog rebuild after exit.\r\n")?;
+                output.flush()?;
+            }
             if failed.load(Ordering::Acquire) && !warning {
                 warning = true;
                 sender.take();
@@ -417,6 +429,9 @@ pub fn run(config: &Config, command: Vec<String>, capture: bool) -> Result<u32> 
                         send(&mut sender, start, 'o', buffer[..n].to_vec(), &failed);
                         output.write_all(&buffer[..n])?;
                         output.flush()?;
+                        if status.is_some() {
+                            exited_at = Some(Instant::now());
+                        }
                     }
                     Err(e) if e.raw_os_error() == Some(libc::EIO) => eof = true,
                     Err(e) if e.kind() == std::io::ErrorKind::Interrupted => (),
@@ -459,6 +474,16 @@ pub fn run(config: &Config, command: Vec<String>, capture: bool) -> Result<u32> 
         .and_then(|r| r);
     drop(raw);
     let duration = start.elapsed();
+    if let Some(derived) = derived {
+        match derived.finish() {
+            Ok(true) => meta.transcript_complete = true,
+            Ok(false) => meta.transcript_error = Some("cast has no complete exit event".into()),
+            Err(e) => meta.transcript_error = Some(format!("{e:#}")),
+        }
+    }
+    if let Some(error) = &meta.transcript_error {
+        eprintln!("WARNING: transcript incomplete: {error}; run termlog rebuild {id}");
+    }
     meta.ended_at = Some(meta.started_at + chrono::Duration::from_std(duration)?);
     meta.duration_ms = Some(duration.as_millis() as u64);
     meta.exit_code = Some(exit);
@@ -467,12 +492,16 @@ pub fn run(config: &Config, command: Vec<String>, capture: bool) -> Result<u32> 
         .as_ref()
         .err()
         .or(result.as_ref().err())
-        .map(|e| format!("{e:#}"));
-    meta.complete = relay.is_ok()
+        .map(|e| format!("{e:#}"))
+        .or_else(|| {
+            (meta.utf8_replacements > 0)
+                .then(|| "invalid UTF-8 was replaced in the recording".into())
+        });
+    meta.recording_complete = relay.is_ok()
         && result.is_ok()
         && !failed.load(Ordering::Acquire)
         && meta.utf8_replacements == 0;
-    if !meta.complete {
+    if !meta.recording_complete {
         eprintln!(
             "WARNING: session {} is incomplete{}",
             id,
@@ -524,4 +553,23 @@ fn exit_code(status: &portable_pty::ExitStatus) -> u32 {
         }
     }
     status.exit_code()
+}
+
+pub fn replay_interrupted(signals: &Signals) -> Result<bool> {
+    if signals.take().is_some() {
+        return Ok(true);
+    }
+    let mut p = libc::pollfd {
+        fd: 0,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    if unsafe { libc::poll(&mut p, 1, 0) } > 0 && p.revents & libc::POLLIN != 0 {
+        let mut b = [0u8; 64];
+        let n = std::io::stdin().read(&mut b)?;
+        if b[..n].iter().any(|b| matches!(b, 3 | b'q')) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }

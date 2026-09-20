@@ -1,9 +1,10 @@
 use crate::{storage::Header, transcript::Transcript};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
     fs::File,
-    io::{BufWriter, Write},
+    io::{BufRead, BufReader, BufWriter, Write},
+    path::Path,
     sync::{
         atomic::{AtomicU64, Ordering},
         mpsc::{Receiver, RecvTimeoutError},
@@ -76,45 +77,24 @@ impl Decoder {
 }
 pub struct Writer {
     cast: BufWriter<File>,
-    transcript_file: Option<BufWriter<File>>,
-    transcript: Transcript,
     last: u64,
     output: Decoder,
     input: Decoder,
     replacements: Arc<AtomicU64>,
 }
 impl Writer {
-    pub fn new(
-        cast: File,
-        transcript: Option<File>,
-        header: &Header,
-        replacements: Arc<AtomicU64>,
-    ) -> Result<Self> {
+    pub fn new(cast: File, header: &Header, replacements: Arc<AtomicU64>) -> Result<Self> {
         let mut cast = BufWriter::new(cast);
         serde_json::to_writer(&mut cast, header)?;
         cast.write_all(b"\n")?;
         cast.flush()?;
         Ok(Self {
             cast,
-            transcript_file: transcript.map(BufWriter::new),
-            transcript: Transcript::new(
-                header.term.rows,
-                header.term.cols,
-                header.termlog.started_at,
-            ),
             last: 0,
             output: Decoder::default(),
             input: Decoder::default(),
             replacements,
         })
-    }
-    fn lines(&mut self, lines: Vec<String>) -> Result<()> {
-        if let Some(f) = &mut self.transcript_file {
-            for line in lines {
-                f.write_all(line.as_bytes())?;
-            }
-        }
-        Ok(())
     }
     fn text_event(&mut self, time: u64, kind: char, data: String) -> Result<()> {
         let time = time.max(self.last);
@@ -126,8 +106,7 @@ impl Writer {
         serde_json::to_writer(&mut self.cast, &event)?;
         self.cast.write_all(b"\n")?;
         self.last = time;
-        let lines = event.transcript(&mut self.transcript, time)?;
-        self.lines(lines)
+        Ok(())
     }
 
     fn event(&mut self, event: Event) -> Result<()> {
@@ -165,9 +144,6 @@ impl Writer {
     }
     fn flush(&mut self) -> Result<()> {
         self.cast.flush()?;
-        if let Some(f) = &mut self.transcript_file {
-            f.flush()?;
-        }
         Ok(())
     }
     pub fn run(mut self, rx: Receiver<Event>, interval: u64) -> Result<()> {
@@ -199,6 +175,67 @@ pub fn parse_size(s: &str) -> Result<(u16, u16)> {
     anyhow::ensure!(cols > 0 && rows > 0, "empty terminal size");
     Ok((cols, rows))
 }
+pub struct CastReader {
+    reader: BufReader<File>,
+    pub header: Header,
+    pending: Vec<u8>,
+    time: u64,
+    exited: bool,
+}
+impl CastReader {
+    pub fn open(path: &Path) -> Result<Self> {
+        let mut reader = BufReader::new(File::open(path.join("events.cast"))?);
+        let mut line = String::new();
+        reader.read_line(&mut line)?;
+        let header: Header = serde_json::from_str(&line).context("invalid cast header")?;
+        anyhow::ensure!(header.version == 3, "expected asciicast v3");
+        anyhow::ensure!(
+            header.termlog.transcript_version == crate::transcript::VERSION,
+            "unsupported transcript version"
+        );
+        anyhow::ensure!(
+            header.term.rows > 0 && header.term.cols > 0,
+            "invalid terminal dimensions"
+        );
+        Ok(Self {
+            reader,
+            header,
+            pending: Vec::new(),
+            time: 0,
+            exited: false,
+        })
+    }
+    // At a temporary EOF, keep a partial line until the writer appends its rest.
+    pub fn next(&mut self) -> Result<Option<(u64, CastEvent)>> {
+        loop {
+            if self.reader.read_until(b'\n', &mut self.pending)? == 0
+                || !self.pending.ends_with(b"\n")
+            {
+                return Ok(None);
+            }
+            let line = std::mem::take(&mut self.pending);
+            if line.starts_with(b"#") {
+                continue;
+            }
+            anyhow::ensure!(!self.exited, "cast contains an event after exit");
+            let event: CastEvent = serde_json::from_slice(&line).context("invalid cast event")?;
+            anyhow::ensure!(
+                event.0.is_finite() && event.0 >= 0.0 && event.0 < 1e10,
+                "invalid cast interval"
+            );
+            self.time = self
+                .time
+                .checked_add((event.0 * 1_000_000.0).round() as u64)
+                .context("cast timing overflow")?;
+            self.exited = event.1 == "x";
+            return Ok(Some((self.time, event)));
+        }
+    }
+    pub fn complete(&self) -> bool {
+        self.exited && self.pending.is_empty()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

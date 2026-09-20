@@ -2,7 +2,7 @@
 
 Local terminal recording for macOS and Linux. Saves asciicast v3 recordings and
 searchable, timestamped text. Input capture is off by default; displayed secrets
-are still recorded. Use `--capture-input` to include hidden input.
+are still recorded. Use `--capture-input` to include hidden input, or `--no-capture-input` to override configuration.
 
 ```sh
 cargo install --locked --path .
@@ -21,4 +21,5 @@ Set your terminal startup command to the absolute path of `termlog` followed by
 
 ```sh
 cargo test --locked
+cargo build --locked && python3 tests/pty_integration.py
 ```

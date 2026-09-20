@@ -1,11 +1,13 @@
 mod commands;
 mod config;
+mod derive_log;
 mod platform;
 mod record;
+mod replay;
 mod storage;
 mod transcript;
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -22,12 +24,12 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     Shell {
-        #[arg(long)]
-        capture_input: bool,
+        #[command(flatten)]
+        capture: Capture,
     },
     Run {
-        #[arg(long)]
-        capture_input: bool,
+        #[command(flatten)]
+        capture: Capture,
         #[arg(required = true, last = true)]
         command: Vec<String>,
     },
@@ -53,22 +55,37 @@ enum Command {
         label: String,
     },
 }
+#[derive(Args)]
+struct Capture {
+    #[arg(long, conflicts_with = "no_capture_input")]
+    capture_input: bool,
+    #[arg(long, conflicts_with = "capture_input")]
+    no_capture_input: bool,
+}
+impl Capture {
+    fn resolve(&self, default: bool) -> bool {
+        if self.no_capture_input {
+            false
+        } else if self.capture_input {
+            true
+        } else {
+            default
+        }
+    }
+}
 fn execute() -> Result<u32> {
     let cli = Cli::parse();
     let config = config::Config::load(cli.config)?;
     match cli.command {
-        Command::Shell { capture_input } => {
+        Command::Shell { capture } => {
             return platform::run(
                 &config,
                 config.shell_command()?,
-                capture_input || config.capture_input,
+                capture.resolve(config.capture_input),
             );
         }
-        Command::Run {
-            capture_input,
-            command,
-        } => {
-            return platform::run(&config, command, capture_input || config.capture_input);
+        Command::Run { capture, command } => {
+            return platform::run(&config, command, capture.resolve(config.capture_input));
         }
         Command::Status => return platform::status(),
         Command::Mark { label } => {
