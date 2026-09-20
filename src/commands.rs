@@ -8,43 +8,50 @@ use std::{
     collections::VecDeque,
     fs::{self, File},
     io::{BufRead, BufReader, BufWriter, Write},
-    path::Path,
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
-pub fn list(root: &Path) -> Result<()> {
-    let mut sessions = Vec::new();
-    for path in storage::sessions(root)? {
-        match fs::read(path.join("metadata.json"))
-            .map_err(anyhow::Error::from)
-            .and_then(|bytes| Ok(serde_json::from_slice::<Metadata>(&bytes)?))
-        {
-            Ok(metadata) => sessions.push(metadata),
-            Err(e) => eprintln!("WARNING: cannot read {}: {e}", path.display()),
-        }
-    }
-    sessions.sort_by(|a, b| {
+fn metadata(path: &Path) -> Result<Metadata> {
+    let file = path.join("metadata.json");
+    serde_json::from_slice(&fs::read(&file).with_context(|| format!("reading {}", file.display()))?)
+        .with_context(|| format!("parsing {}", file.display()))
+}
+fn sessions_with_metadata(root: &Path) -> Result<Vec<(PathBuf, Metadata)>> {
+    let mut sessions = storage::sessions(root)?
+        .into_iter()
+        .map(|path| Ok((path.clone(), metadata(&path)?)))
+        .collect::<Result<Vec<_>>>()?;
+    sessions.sort_by(|(_, a), (_, b)| {
         b.started_at
             .cmp(&a.started_at)
             .then_with(|| a.session_id.cmp(&b.session_id))
     });
-    for m in sessions {
+    Ok(sessions)
+}
+fn warn_incomplete(id: &str) {
+    eprintln!("WARNING: transcript is incomplete for session {id}\nRun: termlog rebuild {id}");
+}
+pub fn list(root: &Path) -> Result<()> {
+    for (_, m) in sessions_with_metadata(root)? {
+        let state = |complete| if complete { "complete" } else { "incomplete" };
         println!(
-            "{}  {}  {}s  {}  {}",
+            "{}  {}  {}s  {}  recording={} transcript={}",
             m.started_at.format("%Y-%m-%d %H:%M:%S"),
             m.session_id,
             m.duration_ms.unwrap_or(0) / 1000,
             m.shell,
-            if m.recording_complete {
-                "complete"
-            } else {
-                "incomplete"
-            }
+            state(m.recording_complete),
+            state(m.transcript_complete)
         );
     }
     Ok(())
 }
 pub fn show(path: &Path) -> Result<()> {
+    let m = metadata(path)?;
+    if !m.transcript_complete {
+        warn_incomplete(&m.session_id);
+    }
     std::io::copy(
         &mut File::open(path.join("transcript.log"))
             .context("transcript is unavailable; use rebuild")?,
@@ -60,19 +67,48 @@ pub fn search(root: &Path, pattern: &str, context: usize, fixed: bool) -> Result
     })?;
     anyhow::ensure!(context <= 10000, "context exceeds 10000 lines");
     let mut found = false;
+    let mut incomplete = false;
     let mut out = std::io::stdout().lock();
-    for path in storage::sessions(root)? {
+    let sessions = match sessions_with_metadata(root) {
+        Ok(sessions) => sessions,
+        Err(e) => {
+            eprintln!("ERROR: search completeness cannot be determined: {e:#}");
+            return Ok(2);
+        }
+    };
+    for (path, metadata) in sessions {
+        if !metadata.transcript_complete {
+            incomplete = true;
+            warn_incomplete(&metadata.session_id);
+        }
         let file = match File::open(path.join("transcript.log")) {
             Ok(f) => f,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(e.into()),
+            Err(e) => {
+                incomplete = true;
+                eprintln!(
+                    "WARNING: cannot read transcript for {}: {e}",
+                    metadata.session_id
+                );
+                if metadata.transcript_complete {
+                    warn_incomplete(&metadata.session_id);
+                }
+                continue;
+            }
         };
         let id = path.file_name().unwrap().to_string_lossy();
         let mut before = VecDeque::new();
         let mut remaining = 0;
         let mut last = None;
         for (index, line) in BufReader::new(file).lines().enumerate() {
-            let line = line?;
+            let line = match line {
+                Ok(line) => line,
+                Err(e) => {
+                    incomplete = true;
+                    eprintln!("WARNING: cannot read transcript for {id}: {e}");
+                    warn_incomplete(&id);
+                    break;
+                }
+            };
             let hit = regex.is_match(&line);
             if hit {
                 found = true;
@@ -101,7 +137,13 @@ pub fn search(root: &Path, pattern: &str, context: usize, fixed: bool) -> Result
             }
         }
     }
-    Ok(if found { 0 } else { 1 })
+    Ok(if incomplete {
+        2
+    } else if found {
+        0
+    } else {
+        1
+    })
 }
 pub fn rebuild(path: &Path) -> Result<()> {
     let id = path.file_name().unwrap().to_string_lossy();
@@ -157,15 +199,8 @@ pub fn replay(path: &Path) -> Result<()> {
     let mut cast = CastReader::open(path)?;
     let _raw = crate::platform::RawTerminal::enter()?;
     let signals = crate::platform::Signals::new(&[libc::SIGINT, libc::SIGTERM, libc::SIGHUP])?;
-    let mut out = std::io::stdout();
+    let mut out = crate::replay::Restore(std::io::stdout());
     let mut filter = crate::replay::Filter::default();
-    struct Restore;
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            let _ = std::io::stdout().write_all(b"\x1b[0m\x1b[?25h\x1b[?1049l");
-        }
-    }
-    let _restore = Restore;
     let start = Instant::now();
     while let Some((micros, e)) = cast.next()? {
         let due = Duration::from_micros(micros);
@@ -182,9 +217,9 @@ pub fn replay(path: &Path) -> Result<()> {
             return Ok(());
         }
         if e.1 == "o" {
-            out.write_all(&filter.feed(&e.2))?;
+            out.0.write_all(&filter.feed(&e.2))?;
         }
-        out.flush()?;
+        out.0.flush()?;
     }
     Ok(())
 }

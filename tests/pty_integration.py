@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import errno
+import faulthandler
 import fcntl
 import json
 import os
@@ -22,8 +23,9 @@ class Terminal:
     def __init__(self, root, args, limit=None):
         self.root = Path(root)
         self.master, self.slave = pty.openpty()
+        os.set_blocking(self.master, False)
         fcntl.ioctl(self.slave, termios.TIOCSWINSZ, struct.pack('HHHH', 24, 100, 0, 0))
-        self.original = termios.tcgetattr(self.slave)
+        self.original = termios.tcgetattr(self.master)
         self.data = bytearray()
         self.closed = False
         env = dict(os.environ, XDG_STATE_HOME=str(root), XDG_CONFIG_HOME=str(self.root/'config'), TERM='xterm-256color', SHELL='/bin/bash', PS1='READY> ')
@@ -39,9 +41,13 @@ class Terminal:
     def send(self, data): os.write(self.master, data)
     def read(self, timeout=.05):
         if select.select([self.master],[],[],timeout)[0]:
-            try: self.data.extend(os.read(self.master,65536))
+            try:
+                data=os.read(self.master,65536)
+                self.data.extend(data)
+                return bool(data)
             except OSError as e:
-                if e.errno != errno.EIO: raise
+                if e.errno not in (errno.EIO,errno.EAGAIN): raise
+        return False
     def until(self, text, timeout=10):
         end=time.monotonic()+timeout
         while text not in self.data and time.monotonic()<end:
@@ -52,8 +58,9 @@ class Terminal:
         end=time.monotonic()+timeout
         while self.process.poll() is None and time.monotonic()<end: self.read()
         if self.process.poll() is None: raise AssertionError('recorder deadlocked')
-        while select.select([self.master],[],[],0)[0]: self.read(0)
-        self.restored = termios.tcgetattr(self.slave) == self.original
+        # macOS keeps a hung-up PTY readable; stop draining at EOF.
+        while self.read(0): pass
+        self.restored = termios.tcgetattr(self.master) == self.original
         self.close()
         return self.process.returncode
     def close(self):
@@ -69,6 +76,8 @@ class Terminal:
 
 class RecorderTests(unittest.TestCase):
     def setUp(self):
+        faulthandler.dump_traceback_later(120, exit=True)
+        self.addCleanup(faulthandler.cancel_dump_traceback_later)
         self.tmp=tempfile.TemporaryDirectory();self.root=Path(self.tmp.name)
         self.addCleanup(self.tmp.cleanup)
     def terminal(self,args,limit=None):
@@ -206,5 +215,66 @@ print("done")'''
         replay=self.terminal(['replay',path.name]);self.assertEqual(replay.finish(),0)
         self.assertTrue(replay.restored);self.assertIn(b'\x1b[31mred',replay.data)
         for denied in [b']52',b'title',b'payload',b'\x1b[8;'] :self.assertNotIn(denied,replay.data)
+
+    def test_incomplete_transcript_visibility(self):
+        t=self.run_child('print("needle")');self.assertEqual(t.finish(),0);path=t.path()
+        for pattern,code in [('needle',0),('absent',1)]:
+            self.assertEqual(self.cli('search',pattern).returncode,code)
+        metadata=t.metadata();metadata['transcript_complete']=False
+        (path/'metadata.json').write_text(json.dumps(metadata))
+        for pattern in ('needle','absent'):
+            result=self.cli('search',pattern)
+            self.assertEqual(result.returncode,2,result.stderr)
+            self.assertIn(path.name.encode(),result.stderr)
+            self.assertIn(b'Run: termlog rebuild',result.stderr)
+            if pattern=='needle':self.assertIn(b'needle',result.stdout)
+        shown=self.cli('show',path.name)
+        self.assertEqual(shown.returncode,0);self.assertIn(b'needle',shown.stdout)
+        self.assertIn(b'incomplete',shown.stderr);self.assertIn(path.name.encode(),shown.stderr)
+        listed=self.cli('list')
+        self.assertIn(b'recording=complete transcript=incomplete',listed.stdout)
+        (path/'transcript.log').unlink()
+        self.assertEqual(self.cli('search','needle').returncode,2)
+        self.assertNotEqual(self.cli('show',path.name).returncode,0)
+        metadata['transcript_complete']=True
+        (path/'metadata.json').write_text(json.dumps(metadata))
+        self.assertEqual(self.cli('search','absent').returncode,2)
+        (path/'metadata.json').write_text('invalid json')
+        result=self.cli('search','absent')
+        self.assertEqual(result.returncode,2);self.assertIn(b'metadata.json',result.stderr)
+
+    def test_search_order_and_timestamp_ties(self):
+        t=self.run_child('print("needle")');self.assertEqual(t.finish(),0);path=t.path()
+        template=t.metadata();template['started_at']='2026-09-20T00:00:00Z'
+        (path/'metadata.json').write_text(json.dumps(template))
+        ids=['ffffffff-ffff-4fff-8fff-ffffffffffff','00000000-0000-4000-8000-000000000000','aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa']
+        for id,date in zip(ids,['2026-09-20T01:00:00Z','2026-09-20T23:00:00Z','2026-09-20T23:00:00Z']):
+            session=path.parent/id;session.mkdir()
+            (session/'metadata.json').write_text(json.dumps(dict(template,session_id=id,started_at=date)))
+            (session/'transcript.log').write_text('needle\n')
+        result=self.cli('search','needle');self.assertEqual(result.returncode,0,result.stderr)
+        self.assertEqual([line.split(':')[0] for line in result.stdout.decode().splitlines()],[ids[1],ids[2],ids[0],path.name])
+        result=self.cli('list');self.assertEqual(result.returncode,0)
+        self.assertEqual([line.split()[2] for line in result.stdout.decode().splitlines()],[ids[1],ids[2],ids[0],path.name])
+
+    def test_replay_restores_display_on_exit_and_interrupt(self):
+        t=self.run_child('print("ok")');self.assertEqual(t.finish(),0);path=t.path()
+        header=json.loads((path/'events.cast').read_text().splitlines()[0])
+        reset=b'\x1b[0m\x1b[?6l\x1b[?7h\x1b[r\x1b[?25h\x1b[?1049l'
+        for stop in ('normal','q','ctrl-c','sigint','sigterm','parser-error'):
+            with self.subTest(stop=stop):
+                events=[[0,'o','\x1b[?6h\x1b[?7l\x1b[5;10rREADY']]
+                if stop=='parser-error':events.append([0,'o'])
+                else:events.append([0 if stop=='normal' else 30,'x','0'])
+                (path/'events.cast').write_text('\n'.join(json.dumps(e) for e in [header,*events])+'\n')
+                replay=self.terminal(['replay',path.name]);replay.until(b'READY')
+                if stop=='q':replay.send(b'q')
+                elif stop=='ctrl-c':replay.send(b'\x03')
+                elif stop=='sigint':replay.process.send_signal(signal.SIGINT)
+                elif stop=='sigterm':replay.process.terminate()
+                code=replay.finish()
+                self.assertEqual(code,1 if stop=='parser-error' else 0,replay.data)
+                self.assertTrue(replay.restored);self.assertIn(reset,replay.data)
+                self.assertIn(b'\x1b[?6h\x1b[?7l\x1b[5;10r',replay.data)
 
 if __name__=='__main__': unittest.main(verbosity=2)

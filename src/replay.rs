@@ -1,3 +1,15 @@
+use std::io::Write;
+
+const RESET: &[u8] = b"\x1b[0m\x1b[?6l\x1b[?7h\x1b[r\x1b[?25h\x1b[?1049l";
+
+pub struct Restore<W: Write>(pub W);
+impl<W: Write> Drop for Restore<W> {
+    fn drop(&mut self) {
+        let _ = self.0.write_all(RESET);
+        let _ = self.0.flush();
+    }
+}
+
 use vte::{Params, Perform};
 
 #[derive(Default)]
@@ -107,5 +119,41 @@ mod tests {
         assert!(filter.feed("2;c;hidden\x1b").is_empty());
         assert_eq!(filter.feed("\\end\x1b[3"), b"end");
         assert_eq!(filter.feed("2mgreen"), b"\x1b[32mgreen");
+    }
+    #[test]
+    fn restore_on_write_error_and_panic() {
+        struct Output {
+            bytes: Vec<u8>,
+            fail: bool,
+        }
+        impl Write for Output {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                if std::mem::take(&mut self.fail) {
+                    return Err(std::io::Error::other("injected write failure"));
+                }
+                self.bytes.extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        for panic in [false, true] {
+            let mut output = Output {
+                bytes: Vec::new(),
+                fail: !panic,
+            };
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                || -> std::io::Result<()> {
+                    let guard = Restore(&mut output);
+                    if panic {
+                        panic!("injected replay panic");
+                    }
+                    guard.0.write_all(b"output")?;
+                    Ok(())
+                },
+            ));
+            assert_eq!(output.bytes, RESET);
+        }
     }
 }

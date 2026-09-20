@@ -7,7 +7,7 @@ use std::{
     path::Path,
     sync::{
         atomic::{AtomicU64, Ordering},
-        mpsc::{Receiver, RecvTimeoutError},
+        mpsc::{Receiver, RecvTimeoutError, SyncSender},
         Arc,
     },
     time::{Duration, Instant},
@@ -77,19 +77,28 @@ impl Decoder {
 }
 pub struct Writer {
     cast: BufWriter<File>,
+    notify: SyncSender<()>,
+    dirty: bool,
     last: u64,
     output: Decoder,
     input: Decoder,
     replacements: Arc<AtomicU64>,
 }
 impl Writer {
-    pub fn new(cast: File, header: &Header, replacements: Arc<AtomicU64>) -> Result<Self> {
+    pub fn new(
+        cast: File,
+        header: &Header,
+        replacements: Arc<AtomicU64>,
+        notify: SyncSender<()>,
+    ) -> Result<Self> {
         let mut cast = BufWriter::new(cast);
         serde_json::to_writer(&mut cast, header)?;
         cast.write_all(b"\n")?;
         cast.flush()?;
         Ok(Self {
             cast,
+            notify,
+            dirty: false,
             last: 0,
             output: Decoder::default(),
             input: Decoder::default(),
@@ -106,6 +115,7 @@ impl Writer {
         serde_json::to_writer(&mut self.cast, &event)?;
         self.cast.write_all(b"\n")?;
         self.last = time;
+        self.dirty = true;
         Ok(())
     }
 
@@ -144,6 +154,11 @@ impl Writer {
     }
     fn flush(&mut self) -> Result<()> {
         self.cast.flush()?;
+        // A pending wake already covers this flush; never wait for the consumer.
+        if self.dirty {
+            let _ = self.notify.try_send(());
+            self.dirty = false;
+        }
         Ok(())
     }
     pub fn run(mut self, rx: Receiver<Event>, interval: u64) -> Result<()> {

@@ -187,6 +187,7 @@ pub fn run(config: &Config, command: Vec<String>, capture: bool) -> Result<u32> 
             .exec();
         return Err(error.into());
     }
+    let (notify, updates) = mpsc::sync_channel(1);
     let prepared = (|| {
         unsafe {
             if libc::isatty(0) != 1 || libc::isatty(1) != 1 {
@@ -248,6 +249,7 @@ pub fn run(config: &Config, command: Vec<String>, capture: bool) -> Result<u32> 
             storage::new_file(&path.join("events.cast"))?,
             &header,
             replacements.clone(),
+            notify,
         )?;
         Ok((
             id,
@@ -311,7 +313,7 @@ pub fn run(config: &Config, command: Vec<String>, capture: bool) -> Result<u32> 
     let derived = config
         .transcript
         .enabled
-        .then(|| derive_log::Worker::start(&path, interval));
+        .then(|| derive_log::Worker::start(&path, updates));
     let mut transcript_warning = false;
     let mut sender = Some(tx);
     let mut warning = false;
