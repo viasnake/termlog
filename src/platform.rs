@@ -371,8 +371,16 @@ pub fn run(config: &Config, command: Vec<String>, capture: bool) -> Result<u32> 
             for _ in 0..8 {
                 match listener.accept() {
                     Ok((mut conn, _)) => {
-                        conn.set_read_timeout(Some(Duration::from_millis(20)))?;
-                        conn.set_write_timeout(Some(Duration::from_millis(20)))?;
+                        // A liveness probe may close before we configure the socket.
+                        // Failure of this client must not terminate recording.
+                        let timeout = Some(Duration::from_millis(20));
+                        if conn
+                            .set_read_timeout(timeout)
+                            .and_then(|()| conn.set_write_timeout(timeout))
+                            .is_err()
+                        {
+                            continue;
+                        }
                         let mut bytes = vec![];
                         if (&mut conn).take(8194).read_to_end(&mut bytes).is_ok()
                             && bytes.len() <= 8193

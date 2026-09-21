@@ -124,22 +124,20 @@ pub fn create_session(
     let id = Uuid::new_v4().to_string();
     private_dir(root)?;
     let mut dir = root.to_path_buf();
-    for part in [
-        "sessions".into(),
-        now.format("%Y").to_string(),
-        now.format("%m").to_string(),
-        now.format("%d").to_string(),
-        id.clone(),
-    ] {
+    for part in [now.format("%Y-%m-%d").to_string(), format!("session-{id}")] {
         dir.push(part);
         private_dir(&dir)?;
     }
     Ok((id, dir, now, start))
 }
 pub fn sessions(root: &Path) -> Result<Vec<PathBuf>> {
-    fn walk(p: &Path, depth: u8, out: &mut Vec<PathBuf>) -> Result<()> {
+    fn walk(p: &Path, depth: u8, prefixed: bool, out: &mut Vec<PathBuf>) -> Result<()> {
         if depth == 0 {
-            if p.join("metadata.json").is_file() {
+            if p.file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with("session-") == prefixed)
+                && session_id(p).is_ok()
+                && p.join("metadata.json").is_file()
+            {
                 out.push(p.into());
             }
             return Ok(());
@@ -150,14 +148,24 @@ pub fn sessions(root: &Path) -> Result<Vec<PathBuf>> {
         for item in fs::read_dir(p)? {
             let item = item?;
             if item.file_type()?.is_dir() {
-                walk(&item.path(), depth - 1, out)?;
+                walk(&item.path(), depth - 1, prefixed, out)?;
             }
         }
         Ok(())
     }
     let mut result = vec![];
-    walk(&root.join("sessions"), 4, &mut result)?;
+    walk(root, 2, true, &mut result)?;
+    walk(&root.join("sessions"), 4, false, &mut result)?;
     Ok(result)
+}
+pub fn session_id(path: &Path) -> Result<&str> {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("invalid session directory")?;
+    let id = name.strip_prefix("session-").unwrap_or(name);
+    Uuid::parse_str(id).context("invalid session directory ID")?;
+    Ok(id)
 }
 pub fn resolve(root: &Path, id: &str) -> Result<PathBuf> {
     if id.is_empty() || !id.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
@@ -165,7 +173,7 @@ pub fn resolve(root: &Path, id: &str) -> Result<PathBuf> {
     }
     let matches: Vec<_> = sessions(root)?
         .into_iter()
-        .filter(|p| p.file_name().unwrap().to_string_lossy().starts_with(id))
+        .filter(|p| session_id(p).is_ok_and(|candidate| candidate.starts_with(id)))
         .collect();
     match matches.len() {
         1 => Ok(matches[0].clone()),

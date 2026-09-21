@@ -17,7 +17,8 @@ termlog replay SESSION
 Set your terminal startup command to the absolute path of `termlog` followed by
 `shell`. Configuration: `$XDG_CONFIG_HOME/termlog/config.toml` (default
 `~/.config/termlog/config.toml`). Recordings: `$XDG_STATE_HOME/termlog` (default
-`~/.local/state/termlog`). `termlog --help` lists commands.
+`~/.local/state/termlog`), under `YYYY-MM-DD/session-UUID/`. Existing logs in the
+older `sessions/YYYY/MM/DD/UUID/` layout remain readable. `termlog --help` lists commands.
 
 ```sh
 cargo test --locked

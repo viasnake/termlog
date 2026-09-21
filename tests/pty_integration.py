@@ -9,6 +9,8 @@ import pty
 import resource
 import select
 import signal
+import shutil
+from datetime import datetime
 import struct
 import subprocess
 import sys
@@ -68,7 +70,7 @@ class Terminal:
             if self.process.poll() is None: self.process.kill();self.process.wait()
             os.close(self.master);os.close(self.slave);self.closed=True
     def path(self):
-        paths=list(self.root.glob('termlog/sessions/*/*/*/*'))
+        paths=list(self.root.glob('termlog/????-??-??/session-*'))
         assert len(paths)==1,paths
         return paths[0]
     def metadata(self): return json.loads((self.path()/'metadata.json').read_text())
@@ -152,7 +154,7 @@ print("done")'''
         self.assertEqual(''.join(e[2] for e in t.events() if e[1]=='o'),'日本語\r\n')
         self.assertTrue(t.metadata()['recording_complete']);self.assertEqual(t.metadata()['utf8_replacements'],0)
         original=(t.path()/'transcript.log').read_bytes()
-        self.assertEqual(self.cli('rebuild',t.path().name).returncode,0)
+        self.assertEqual(self.cli('rebuild',t.path().name.removeprefix('session-')).returncode,0)
         self.assertEqual((t.path()/'transcript.log').read_bytes(),original)
     def test_invalid_utf8_marks_only_the_original_loss(self):
         t=self.run_child('import os;os.write(1,bytes([255]))')
@@ -175,7 +177,7 @@ print("done")'''
         self.assertEqual(t.finish(),0)
         metadata=t.metadata();self.assertTrue(metadata['recording_complete']);self.assertFalse(metadata['transcript_complete'])
         self.assertTrue(metadata['transcript_error']);self.assertEqual(t.events()[-1][1],'x')
-        rebuilt=self.cli('rebuild',t.path().name);self.assertEqual(rebuilt.returncode,0,rebuilt.stderr)
+        rebuilt=self.cli('rebuild',t.path().name.removeprefix('session-'));self.assertEqual(rebuilt.returncode,0,rebuilt.stderr)
         self.assertTrue(t.metadata()['transcript_complete']);self.assertIsNone(t.metadata()['transcript_error'])
         self.assertEqual(len((t.path()/'transcript.log').read_text().splitlines()),3002)
     def test_cast_failure_keeps_child_alive(self):
@@ -200,10 +202,10 @@ print("done")'''
     def test_list_uses_started_at(self):
         t=self.run_child('print("ok")');self.assertEqual(t.finish(),0)
         template=t.metadata();t.path().joinpath('metadata.json').unlink()
-        parent=next((self.root/'termlog/sessions').glob('*/*/*'))
+        parent=next((self.root/'termlog').glob('????-??-??'))
         ids=['ffffffff-ffff-4fff-8fff-ffffffffffff','00000000-0000-4000-8000-000000000000','aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa']
         for id,time_string in zip(ids,['2026-09-20T01:00:00Z','2026-09-20T23:00:00Z','2026-09-20T22:00:00Z']):
-            path=parent/id;path.mkdir();metadata=dict(template,session_id=id,started_at=time_string)
+            path=parent/('session-'+id);path.mkdir();metadata=dict(template,session_id=id,started_at=time_string)
             (path/'metadata.json').write_text(json.dumps(metadata))
         result=self.cli('list');self.assertEqual(result.returncode,0)
         self.assertEqual([line.split()[2] for line in result.stdout.decode().splitlines()],[ids[1],ids[2],ids[0]])
@@ -212,7 +214,7 @@ print("done")'''
         header=json.loads((path/'events.cast').read_text().splitlines()[0])
         events=[[0,'o','a\x1b]52;c;secret\x07\x1b]0;title\x07\x1bPpayload\x1b\\\x1b[8;55;180t\x1b[31mred\x1b[0m'],[0,'r','180x55'],[0,'x','0']]
         (path/'events.cast').write_text('\n'.join(json.dumps(e) for e in [header,*events])+'\n')
-        replay=self.terminal(['replay',path.name]);self.assertEqual(replay.finish(),0)
+        replay=self.terminal(['replay',path.name.removeprefix('session-')]);self.assertEqual(replay.finish(),0)
         self.assertTrue(replay.restored);self.assertIn(b'\x1b[31mred',replay.data)
         for denied in [b']52',b'title',b'payload',b'\x1b[8;'] :self.assertNotIn(denied,replay.data)
 
@@ -225,17 +227,17 @@ print("done")'''
         for pattern in ('needle','absent'):
             result=self.cli('search',pattern)
             self.assertEqual(result.returncode,2,result.stderr)
-            self.assertIn(path.name.encode(),result.stderr)
+            self.assertIn(path.name.removeprefix('session-').encode(),result.stderr)
             self.assertIn(b'Run: termlog rebuild',result.stderr)
             if pattern=='needle':self.assertIn(b'needle',result.stdout)
-        shown=self.cli('show',path.name)
+        shown=self.cli('show',path.name.removeprefix('session-'))
         self.assertEqual(shown.returncode,0);self.assertIn(b'needle',shown.stdout)
-        self.assertIn(b'incomplete',shown.stderr);self.assertIn(path.name.encode(),shown.stderr)
+        self.assertIn(b'incomplete',shown.stderr);self.assertIn(path.name.removeprefix('session-').encode(),shown.stderr)
         listed=self.cli('list')
         self.assertIn(b'recording=complete transcript=incomplete',listed.stdout)
         (path/'transcript.log').unlink()
         self.assertEqual(self.cli('search','needle').returncode,2)
-        self.assertNotEqual(self.cli('show',path.name).returncode,0)
+        self.assertNotEqual(self.cli('show',path.name.removeprefix('session-')).returncode,0)
         metadata['transcript_complete']=True
         (path/'metadata.json').write_text(json.dumps(metadata))
         self.assertEqual(self.cli('search','absent').returncode,2)
@@ -249,13 +251,13 @@ print("done")'''
         (path/'metadata.json').write_text(json.dumps(template))
         ids=['ffffffff-ffff-4fff-8fff-ffffffffffff','00000000-0000-4000-8000-000000000000','aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa']
         for id,date in zip(ids,['2026-09-20T01:00:00Z','2026-09-20T23:00:00Z','2026-09-20T23:00:00Z']):
-            session=path.parent/id;session.mkdir()
+            session=path.parent/('session-'+id);session.mkdir()
             (session/'metadata.json').write_text(json.dumps(dict(template,session_id=id,started_at=date)))
             (session/'transcript.log').write_text('2026-09-20 UTC+00:00\n\n00:00:00  needle\n')
         result=self.cli('search','--plain','needle');self.assertEqual(result.returncode,0,result.stderr)
-        self.assertEqual([line.split(':')[0] for line in result.stdout.decode().splitlines()],[ids[1],ids[2],ids[0],path.name])
+        self.assertEqual([line.split(':')[0] for line in result.stdout.decode().splitlines()],[ids[1],ids[2],ids[0],path.name.removeprefix('session-')])
         result=self.cli('list');self.assertEqual(result.returncode,0)
-        self.assertEqual([line.split()[2] for line in result.stdout.decode().splitlines()],[ids[1],ids[2],ids[0],path.name])
+        self.assertEqual([line.split()[2] for line in result.stdout.decode().splitlines()],[ids[1],ids[2],ids[0],path.name.removeprefix('session-')])
 
     def test_replay_restores_display_on_exit_and_interrupt(self):
         t=self.run_child('print("ok")');self.assertEqual(t.finish(),0);path=t.path()
@@ -267,7 +269,7 @@ print("done")'''
                 if stop=='parser-error':events.append([0,'o'])
                 else:events.append([0 if stop=='normal' else 30,'x','0'])
                 (path/'events.cast').write_text('\n'.join(json.dumps(e) for e in [header,*events])+'\n')
-                replay=self.terminal(['replay',path.name]);replay.until(b'READY')
+                replay=self.terminal(['replay',path.name.removeprefix('session-')]);replay.until(b'READY')
                 if stop=='q':replay.send(b'q')
                 elif stop=='ctrl-c':replay.send(b'\x03')
                 elif stop=='sigint':replay.process.send_signal(signal.SIGINT)
@@ -287,15 +289,15 @@ print("done")'''
         self.assertEqual([row[10:] for row in rows[2:]],['one','two','','  日本語','last'])
         for row in rows[2:]:self.assertRegex(row,r'^\d{2}:\d{2}:\d{2}  ')
         self.assertEqual(t.metadata()['transcript_version'],2)
-        shown=self.cli('show',path.name);self.assertEqual(shown.returncode,0,shown.stderr)
+        shown=self.cli('show',path.name.removeprefix('session-'));self.assertEqual(shown.returncode,0,shown.stderr)
         self.assertIn(original,shown.stdout)
         self.assertIn(b'recording=complete transcript=complete',shown.stdout)
         result=self.cli('search','-C','1','two|日本語');self.assertEqual(result.returncode,0,result.stderr)
-        self.assertEqual(result.stdout.count(path.name.encode()),1)
+        self.assertEqual(result.stdout.count(path.name.removeprefix('session-').encode()),1)
         self.assertIn(original,result.stdout)
         plain=self.cli('search','--plain','-F','日本語');self.assertEqual(plain.returncode,0,plain.stderr)
-        self.assertTrue(plain.stdout.startswith((path.name+':6:').encode()))
-        self.assertEqual(self.cli('rebuild',path.name).returncode,0)
+        self.assertTrue(plain.stdout.startswith((path.name.removeprefix('session-')+':6:').encode()))
+        self.assertEqual(self.cli('rebuild',path.name.removeprefix('session-')).returncode,0)
         self.assertEqual(original,(path/'transcript.log').read_bytes())
 
     def test_legacy_rebuild_show_and_search(self):
@@ -309,18 +311,48 @@ print("done")'''
         (path/'events.cast').write_text('\n'.join(json.dumps(e) for e in [header,*events])+'\n')
         metadata=t.metadata();metadata['transcript_version']=1
         (path/'metadata.json').write_text(json.dumps(metadata))
-        rebuilt=self.cli('rebuild',path.name);self.assertEqual(rebuilt.returncode,0,rebuilt.stderr)
+        rebuilt=self.cli('rebuild',path.name.removeprefix('session-'));self.assertEqual(rebuilt.returncode,0,rebuilt.stderr)
         original=(path/'transcript.log').read_bytes()
         self.assertEqual(original,b'2026-09-20T23:59:59.000000+09:00\tbefore\n2026-09-21T00:00:01.000000+09:00\tafter\n')
-        shown=self.cli('show',path.name);self.assertEqual(shown.returncode,0,shown.stderr)
+        shown=self.cli('show',path.name.removeprefix('session-'));self.assertEqual(shown.returncode,0,shown.stderr)
         self.assertIn(b'2026-09-20 UTC+09:00\n\n23:59:59  before',shown.stdout)
         self.assertIn(b'2026-09-21 UTC+09:00\n\n00:00:01  after',shown.stdout)
         result=self.cli('search','--plain','after');self.assertEqual(result.returncode,0,result.stderr)
-        self.assertEqual(result.stdout,(path.name+':2:').encode()+original.splitlines(keepends=True)[1])
+        self.assertEqual(result.stdout,(path.name.removeprefix('session-')+':2:').encode()+original.splitlines(keepends=True)[1])
         self.assertEqual(original,(path/'transcript.log').read_bytes())
         metadata['transcript_version']=99
         (path/'metadata.json').write_text(json.dumps(metadata))
-        self.assertNotEqual(self.cli('show',path.name).returncode,0)
+        self.assertNotEqual(self.cli('show',path.name.removeprefix('session-')).returncode,0)
         self.assertEqual(self.cli('search','after').returncode,2)
+
+    def test_new_layout_with_legacy_sessions_and_uuid_resolution(self):
+        t=self.run_child('input("layout-ready");print("layout-done")');t.until(b'layout-ready')
+        path=t.path();metadata=t.metadata();id=metadata['session_id']
+        self.assertEqual(path,self.root/'termlog'/str(datetime.fromisoformat(metadata['started_at']).date())/('session-'+id))
+        self.assertFalse((self.root/'termlog/sessions').exists())
+        active=self.cli('rebuild',id)
+        self.assertNotEqual(active.returncode,0);self.assertIn(b'running session',active.stderr)
+        t.send(b'\n');self.assertEqual(t.finish(),0,t.data)
+        self.assertEqual(self.cli('show',id[:8]).returncode,0)
+        legacy_id='11111111-2222-4333-8444-555555555555'
+        legacy=self.root/'termlog/sessions/2000/01/01'/legacy_id
+        shutil.copytree(path,legacy)
+        m=t.metadata();m.update(session_id=legacy_id,started_at='2000-01-01T00:00:00Z')
+        (legacy/'metadata.json').write_text(json.dumps(m))
+        original=(legacy/'transcript.log').read_bytes()
+        listed=self.cli('list');self.assertEqual(listed.returncode,0,listed.stderr)
+        self.assertEqual([line.split()[2] for line in listed.stdout.decode().splitlines()],[id,legacy_id])
+        found=self.cli('search','--plain','layout-done');self.assertEqual(found.returncode,0,found.stderr)
+        self.assertEqual([line.split(':')[0] for line in found.stdout.decode().splitlines()],[id,legacy_id])
+        for session in (id,legacy_id):
+            shown=self.cli('show',session);self.assertEqual(shown.returncode,0,shown.stderr)
+            self.assertIn(b'layout-done',shown.stdout)
+            rebuilt=self.cli('rebuild',session);self.assertEqual(rebuilt.returncode,0,rebuilt.stderr)
+            replay=self.terminal(['replay',session]);self.assertEqual(replay.finish(),0)
+        self.assertEqual(original,(legacy/'transcript.log').read_bytes())
+        # A copied ID in both layouts must not silently select either copy.
+        shutil.copytree(path,legacy.parent/id)
+        ambiguous=self.cli('show',id)
+        self.assertNotEqual(ambiguous.returncode,0);self.assertIn(b'ambiguous',ambiguous.stderr)
 
 if __name__=='__main__': unittest.main(verbosity=2)

@@ -198,8 +198,8 @@ pub fn search(root: &Path, pattern: &str, context: usize, fixed: bool, plain: bo
     })
 }
 pub fn rebuild(path: &Path) -> Result<()> {
-    let id = path.file_name().unwrap().to_string_lossy();
-    if crate::platform::session_running(&id)? {
+    let id = storage::session_id(path)?;
+    if crate::platform::session_running(id)? {
         bail!("cannot rebuild a running session")
     }
     let mut metadata: Metadata = serde_json::from_slice(&fs::read(path.join("metadata.json"))?)?;
