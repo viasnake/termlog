@@ -1,4 +1,7 @@
-use crate::{storage::Header, transcript::Transcript};
+use crate::{
+    storage::{self, Header},
+    transcript::Transcript,
+};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -203,7 +206,7 @@ pub struct CastReader {
 }
 impl CastReader {
     pub fn open(path: &Path) -> Result<Self> {
-        let mut reader = BufReader::new(File::open(path.join("events.cast"))?);
+        let mut reader = BufReader::new(File::open(storage::cast_path(path))?);
         let mut line = String::new();
         reader.read_line(&mut line)?;
         let header: Header = serde_json::from_str(&line).context("invalid cast header")?;

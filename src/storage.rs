@@ -2,6 +2,7 @@ use anyhow::{bail, Context, Result};
 use chrono::{DateTime, FixedOffset, Local};
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::BTreeSet,
     fs::{self, File, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
@@ -111,7 +112,15 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
     result
 }
 pub fn write_metadata(path: &Path, m: &Metadata) -> Result<()> {
-    atomic_write(&path.join("metadata.json"), &serde_json::to_vec_pretty(m)?)
+    atomic_write(&metadata_path(path), &serde_json::to_vec_pretty(m)?)
+}
+
+pub fn cast_path(path: &Path) -> PathBuf {
+    path.with_extension("cast")
+}
+
+pub fn metadata_path(path: &Path) -> PathBuf {
+    path.with_extension("metadata.json")
 }
 pub fn create_session(
     root: &Path,
@@ -120,49 +129,49 @@ pub fn create_session(
     let now = Local::now().fixed_offset();
     let id = Uuid::new_v4().to_string();
     private_dir(root)?;
-    let mut dir = root.to_path_buf();
-    for part in [now.format("%Y-%m-%d").to_string(), format!("session-{id}")] {
-        dir.push(part);
-        private_dir(&dir)?;
-    }
-    Ok((id, dir, now, start))
+    let path = root.join(format!("{}_{}.log", now.format("%Y%m%d-%H%M%S"), id));
+    Ok((id, path, now, start))
 }
+fn session_parts(name: &str) -> Result<(&str, &str)> {
+    let stem = [".metadata.json", ".cast", ".log"]
+        .iter()
+        .find_map(|suffix| name.strip_suffix(suffix))
+        .context("invalid session file")?;
+    let (_, id) = stem.rsplit_once('_').context("invalid session file name")?;
+    Uuid::parse_str(id).context("invalid session file ID")?;
+    Ok((stem, id))
+}
+
 pub fn sessions(root: &Path) -> Result<Vec<PathBuf>> {
-    fn walk(p: &Path, depth: u8, prefixed: bool, out: &mut Vec<PathBuf>) -> Result<()> {
-        if depth == 0 {
-            if p.file_name()
-                .is_some_and(|name| name.to_string_lossy().starts_with("session-") == prefixed)
-                && session_id(p).is_ok()
-            {
-                out.push(p.into());
-            }
-            return Ok(());
-        }
-        if !p.exists() {
-            return Ok(());
-        }
-        for item in fs::read_dir(p)? {
-            let item = item?;
-            if item.file_type()?.is_dir() {
-                walk(&item.path(), depth - 1, prefixed, out)?;
-            }
-        }
-        Ok(())
+    let mut result = BTreeSet::new();
+    if !root.exists() {
+        return Ok(vec![]);
     }
-    let mut result = vec![];
-    walk(root, 2, true, &mut result)?;
-    walk(&root.join("sessions"), 4, false, &mut result)?;
-    Ok(result)
+    for item in fs::read_dir(root)? {
+        let item = item?;
+        if !item.file_type()?.is_file() {
+            continue;
+        }
+        let filename = item.file_name();
+        let Some(name) = filename.to_str() else {
+            continue;
+        };
+        if let Ok((stem, _)) = session_parts(name) {
+            result.insert(item.path().with_file_name(format!("{stem}.log")));
+        }
+    }
+    Ok(result.into_iter().collect())
 }
+
 pub fn session_id(path: &Path) -> Result<&str> {
     let name = path
         .file_name()
         .and_then(|name| name.to_str())
-        .context("invalid session directory")?;
-    let id = name.strip_prefix("session-").unwrap_or(name);
-    Uuid::parse_str(id).context("invalid session directory ID")?;
+        .context("invalid session file")?;
+    let (_, id) = session_parts(name)?;
     Ok(id)
 }
+
 pub fn resolve(root: &Path, id: &str) -> Result<PathBuf> {
     if id.is_empty() || !id.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
         bail!("invalid session ID")

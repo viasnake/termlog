@@ -242,7 +242,7 @@ pub fn run(config: &Config, command: Vec<String>, capture: bool) -> Result<u32> 
         };
         let replacements = Arc::new(AtomicU64::new(0));
         let writer = Writer::new(
-            storage::new_file(&path.join("events.cast"))?,
+            storage::new_file(&storage::cast_path(&path))?,
             &header,
             replacements.clone(),
             notify,

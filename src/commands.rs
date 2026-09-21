@@ -14,12 +14,12 @@ use std::{
 };
 
 fn metadata(path: &Path) -> Option<Metadata> {
-    let file = path.join("metadata.json");
+    let file = storage::metadata_path(path);
     let result: Result<Metadata> = (|| {
         let metadata: Metadata = serde_json::from_slice(&fs::read(&file)?)?;
         anyhow::ensure!(
             metadata.session_id == storage::session_id(path)?,
-            "metadata session ID differs from directory"
+            "metadata session ID differs from session path"
         );
         Ok(metadata)
     })();
@@ -150,8 +150,7 @@ pub fn show(path: &Path) -> Result<()> {
     if !session.complete() {
         warn_incomplete(&session.id);
     }
-    let file = File::open(path.join("transcript.log"))
-        .context("transcript is unavailable; use rebuild")?;
+    let file = File::open(path).context("transcript is unavailable; use rebuild")?;
     let mut reader = Reader::new(BufReader::new(file));
     let mut out = std::io::stdout().lock();
     summary(&mut out, &session)?;
@@ -183,8 +182,7 @@ pub fn search(root: &Path, pattern: &str, context: usize, fixed: bool, plain: bo
             incomplete = true;
             warn_incomplete(&session.id);
         }
-        let source = File::open(session.path.join("transcript.log"))
-            .map(|file| Reader::new(BufReader::new(file)));
+        let source = File::open(&session.path).map(|file| Reader::new(BufReader::new(file)));
         let mut reader = match source {
             Ok(reader) => reader,
             Err(e) => {
@@ -281,8 +279,8 @@ pub fn rebuild(path: &Path) -> Result<()> {
         cast.header.termlog.started_at,
     );
     let mut format = Format::default();
-    let target = path.join("transcript.log");
-    let temp = path.join(format!("transcript.tmp-{}", uuid::Uuid::new_v4()));
+    let target = path.to_owned();
+    let temp = target.with_extension(format!("tmp-{}", uuid::Uuid::new_v4()));
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let mut file = BufWriter::new(storage::new_file(&temp)?);
         while let Some((time, e)) = cast.next()? {

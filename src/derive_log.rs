@@ -17,7 +17,7 @@ pub struct Worker {
 }
 impl Worker {
     pub fn start(path: &Path, updates: Receiver<()>) -> Self {
-        let target = path.join("transcript.log");
+        let target = path.to_owned();
         Self::spawn(path.to_owned(), updates, move || storage::new_file(&target))
     }
     fn spawn<W: Write + Send + 'static>(
@@ -91,11 +91,13 @@ mod tests {
 
     fn recorder() -> (
         tempfile::TempDir,
+        PathBuf,
         SyncSender<Event>,
         Receiver<Result<()>>,
         Receiver<()>,
     ) {
         let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.log");
         let header = serde_json::from_value(serde_json::json!({
             "version":3,"term":{"cols":80,"rows":24,"type":"xterm"},
             "timestamp":0,"command":"test","env":{},
@@ -104,7 +106,7 @@ mod tests {
         .unwrap();
         let (notify, updates) = mpsc::sync_channel(1);
         let writer = Writer::new(
-            storage::new_file(&dir.path().join("events.cast")).unwrap(),
+            storage::new_file(&storage::cast_path(&path)).unwrap(),
             &header,
             Arc::new(AtomicU64::new(0)),
             notify,
@@ -115,7 +117,7 @@ mod tests {
         thread::spawn(move || {
             let _ = finished.send(writer.run(rx, 0));
         });
-        (dir, tx, result, updates)
+        (dir, path, tx, result, updates)
     }
     fn event(tx: &SyncSender<Event>, kind: char, data: &str) {
         tx.send(Event {
@@ -146,11 +148,11 @@ mod tests {
     }
     #[test]
     fn parser_error_does_not_stop_cast() {
-        let (dir, tx, done, updates) = recorder();
-        let worker = Worker::spawn(dir.path().to_owned(), updates, || Ok(std::io::sink()));
+        let (_dir, path, tx, done, updates) = recorder();
+        let worker = Worker::spawn(path.clone(), updates, || Ok(std::io::sink()));
         event(&tx, 'r', "invalid-size");
         wait_failure(&worker);
-        finish(tx, done, dir.path());
+        finish(tx, done, &path);
         assert!(worker
             .finish()
             .unwrap_err()
@@ -168,11 +170,11 @@ mod tests {
     }
     #[test]
     fn transcript_panic_does_not_stop_cast() {
-        let (dir, tx, done, updates) = recorder();
-        let worker = Worker::spawn(dir.path().to_owned(), updates, || Ok(PanickingOutput));
+        let (_dir, path, tx, done, updates) = recorder();
+        let worker = Worker::spawn(path.clone(), updates, || Ok(PanickingOutput));
         event(&tx, 'o', "text\r\n");
         wait_failure(&worker);
-        finish(tx, done, dir.path());
+        finish(tx, done, &path);
         assert!(worker
             .finish()
             .unwrap_err()
@@ -195,10 +197,10 @@ mod tests {
     }
     #[test]
     fn blocked_transcript_does_not_backpressure_cast() {
-        let (dir, tx, done, updates) = recorder();
+        let (_dir, path, tx, done, updates) = recorder();
         let (entered, waiting) = mpsc::channel();
         let (resume, paused) = mpsc::channel();
-        let worker = Worker::spawn(dir.path().to_owned(), updates, || {
+        let worker = Worker::spawn(path.clone(), updates, || {
             Ok(PausedOutput {
                 entered,
                 resume: paused,
@@ -206,7 +208,7 @@ mod tests {
         });
         event(&tx, 'o', "text\r\n");
         waiting.recv_timeout(Duration::from_secs(5)).unwrap();
-        finish(tx, done, dir.path());
+        finish(tx, done, &path);
         assert!(!worker.handle.is_finished());
         // The blocked batch and final batch each require an output write.
         resume.send(()).unwrap();
@@ -226,34 +228,32 @@ mod tests {
     }
     #[test]
     fn idle_worker_waits_for_cast_notification() {
-        let (dir, tx, done, updates) = recorder();
+        let (_dir, path, tx, done, updates) = recorder();
         let (flushed, observed) = mpsc::channel();
-        let worker = Worker::spawn(dir.path().to_owned(), updates, || {
-            Ok(FlushObserver(flushed))
-        });
+        let worker = Worker::spawn(path.clone(), updates, || Ok(FlushObserver(flushed)));
         event(&tx, 'o', "ready\r\n");
         observed.recv_timeout(Duration::from_secs(5)).unwrap();
         assert!(matches!(
             observed.recv_timeout(Duration::from_millis(120)),
             Err(mpsc::RecvTimeoutError::Timeout)
         ));
-        finish(tx, done, dir.path());
+        finish(tx, done, &path);
         assert!(worker.finish().unwrap());
     }
     #[test]
     fn coalesced_notifications_drain_final_cast_data() {
-        let (dir, tx, done, updates) = recorder();
+        let (_dir, path, tx, done, updates) = recorder();
         for _ in 0..1000 {
             event(&tx, 'o', "line\r\n");
         }
-        finish(tx, done, dir.path());
+        finish(tx, done, &path);
         // All flushes fit in a single pending wake. Even after consuming it,
         // disconnect must cause a final drain before the worker exits.
         assert_eq!(updates.try_recv(), Ok(()));
         assert_eq!(updates.try_recv(), Err(mpsc::TryRecvError::Disconnected));
-        let worker = Worker::start(dir.path(), updates);
+        let worker = Worker::start(&path, updates);
         assert!(worker.finish().unwrap());
-        let text = std::fs::read_to_string(dir.path().join("transcript.log")).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
         assert_eq!(text.lines().count(), 1003);
         assert!(text.ends_with("tail\n"));
     }
