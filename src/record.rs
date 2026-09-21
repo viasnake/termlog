@@ -22,7 +22,11 @@ pub struct Event {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CastEvent(pub f64, pub String, pub String);
 impl CastEvent {
-    pub fn transcript(&self, parser: &mut Transcript, time: u64) -> Result<Vec<String>> {
+    pub fn transcript(
+        &self,
+        parser: &mut Transcript,
+        time: u64,
+    ) -> Result<Vec<crate::textlog::Line>> {
         Ok(match self.1.as_str() {
             "o" => parser.feed(&self.2, time),
             "r" => {
@@ -205,7 +209,7 @@ impl CastReader {
         let header: Header = serde_json::from_str(&line).context("invalid cast header")?;
         anyhow::ensure!(header.version == 3, "expected asciicast v3");
         anyhow::ensure!(
-            header.termlog.transcript_version == crate::transcript::VERSION,
+            matches!(header.termlog.transcript_version, 1 | 2),
             "unsupported transcript version"
         );
         anyhow::ensure!(

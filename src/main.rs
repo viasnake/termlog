@@ -5,6 +5,7 @@ mod platform;
 mod record;
 mod replay;
 mod storage;
+mod textlog;
 mod transcript;
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
@@ -42,6 +43,9 @@ enum Command {
         context: usize,
         #[arg(short = 'F', long)]
         fixed_strings: bool,
+        /// Print one session:line:timestamp:text record per result.
+        #[arg(long)]
+        plain: bool,
         pattern: String,
     },
     Replay {
@@ -95,9 +99,16 @@ fn execute() -> Result<u32> {
         Command::Search {
             context,
             fixed_strings,
+            plain,
             pattern,
         } => {
-            return commands::search(&config.state_dir()?, &pattern, context, fixed_strings);
+            return commands::search(
+                &config.state_dir()?,
+                &pattern,
+                context,
+                fixed_strings,
+                plain,
+            );
         }
         Command::Show { session } => {
             commands::show(&storage::resolve(&config.state_dir()?, &session)?)?

@@ -1,8 +1,9 @@
-use chrono::{DateTime, Duration, FixedOffset, SecondsFormat};
+use crate::textlog::Line;
+use chrono::{DateTime, Duration, FixedOffset};
 use unicode_width::UnicodeWidthChar;
 use vte::{Params, Perform};
 
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 #[derive(Clone)]
 struct Row {
     cells: Vec<String>,
@@ -37,7 +38,7 @@ struct Screen {
     saved: (usize, usize),
     time: u64,
     start: DateTime<FixedOffset>,
-    lines: Vec<String>,
+    lines: Vec<Line>,
     prefix: String,
     prefix_time: u64,
     prefix_dirty: bool,
@@ -69,12 +70,12 @@ impl Transcript {
             },
         }
     }
-    pub fn feed(&mut self, text: &str, micros: u64) -> Vec<String> {
+    pub fn feed(&mut self, text: &str, micros: u64) -> Vec<Line> {
         self.screen.time = micros;
         self.parser.advance(&mut self.screen, text.as_bytes());
         self.take()
     }
-    pub fn resize(&mut self, rows: u16, cols: u16) -> Vec<String> {
+    pub fn resize(&mut self, rows: u16, cols: u16) -> Vec<Line> {
         // Preserve pending text before changing the coordinate system.
         self.screen.flush();
         let h = usize::from(rows.clamp(1, 1000));
@@ -88,22 +89,18 @@ impl Transcript {
         self.screen.scroll_bottom = h - 1;
         self.take()
     }
-    pub fn finish(&mut self) -> Vec<String> {
+    pub fn finish(&mut self) -> Vec<Line> {
         self.screen.flush();
         self.take()
     }
-    fn take(&mut self) -> Vec<String> {
+    fn take(&mut self) -> Vec<Line> {
         std::mem::take(&mut self.screen.lines)
     }
 }
 impl Screen {
     fn emit(&mut self, text: String, time: u64) {
         let t = self.start + Duration::microseconds(time.min(i64::MAX as u64) as i64);
-        self.lines.push(format!(
-            "{}\t{}\n",
-            t.to_rfc3339_opts(SecondsFormat::Micros, false),
-            text
-        ));
+        self.lines.push(Line { time: t, text });
     }
     fn commit(&mut self, end: usize) {
         if self.alt {
@@ -406,7 +403,7 @@ mod tests {
         lines.extend(parser.finish());
         lines
             .into_iter()
-            .map(|line| line.split_once('\t').unwrap().1.to_owned())
+            .map(|line| format!("{}\n", line.text))
             .collect()
     }
     #[test]
@@ -435,7 +432,10 @@ mod tests {
         assert!(parser.feed("mpt", 2345).is_empty());
         assert_eq!(
             parser.finish(),
-            vec!["2026-09-20T00:00:00.002345+00:00\tprompt\n"]
+            vec![Line {
+                time: DateTime::parse_from_rfc3339("2026-09-20T00:00:00.002345+00:00").unwrap(),
+                text: "prompt".into()
+            }]
         );
     }
 }

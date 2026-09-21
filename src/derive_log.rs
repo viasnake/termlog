@@ -55,6 +55,7 @@ fn generate(path: &Path, output: impl Write, updates: Receiver<()>) -> Result<bo
         cast.header.termlog.started_at,
     );
     let mut output = BufWriter::new(output);
+    let mut format = crate::textlog::Format::new(cast.header.termlog.transcript_version);
     loop {
         // Sender belongs only to CastWriter. Disconnect means its final flush
         // (including BufWriter's drop on failure) has finished. Drain once more.
@@ -62,7 +63,7 @@ fn generate(path: &Path, output: impl Write, updates: Receiver<()>) -> Result<bo
         while let Some((time, event)) = cast.next()? {
             for line in event.transcript(&mut parser, time)? {
                 output
-                    .write_all(line.as_bytes())
+                    .write_all(format.line(&line).as_bytes())
                     .context("writing transcript")?;
             }
         }
@@ -72,7 +73,7 @@ fn generate(path: &Path, output: impl Write, updates: Receiver<()>) -> Result<bo
         }
     }
     for line in parser.finish() {
-        output.write_all(line.as_bytes())?;
+        output.write_all(format.line(&line).as_bytes())?;
     }
     output.flush()?;
     Ok(cast.complete())

@@ -36,7 +36,7 @@ impl Default for Transcript {
     fn default() -> Self {
         Self {
             enabled: true,
-            timestamps: "rfc3339".into(),
+            timestamps: "clock".into(),
             strip_terminal_sequences: true,
         }
     }
@@ -79,8 +79,10 @@ impl Config {
         if conf.storage.retention_days != 0 {
             bail!("retention_days must be 0; automatic deletion is not implemented")
         }
-        if conf.transcript.timestamps != "rfc3339" || !conf.transcript.strip_terminal_sequences {
-            bail!("transcript requires RFC3339 timestamps and terminal sequence normalization")
+        if !matches!(conf.transcript.timestamps.as_str(), "clock" | "rfc3339")
+            || !conf.transcript.strip_terminal_sequences
+        {
+            bail!("transcript requires clock or rfc3339 timestamps and terminal sequence normalization")
         }
         if conf.flush_interval_ms > 86_400_000 {
             bail!("flush_interval_ms exceeds one day")

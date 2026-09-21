@@ -188,6 +188,11 @@ pub fn run(config: &Config, command: Vec<String>, capture: bool) -> Result<u32> 
         return Err(error.into());
     }
     let (notify, updates) = mpsc::sync_channel(1);
+    let transcript_version = if config.transcript.timestamps == "rfc3339" {
+        1
+    } else {
+        transcript::VERSION
+    };
     let prepared = (|| {
         unsafe {
             if libc::isatty(0) != 1 || libc::isatty(1) != 1 {
@@ -222,7 +227,7 @@ pub fn run(config: &Config, command: Vec<String>, capture: bool) -> Result<u32> 
             transcript_error: None,
             recording_error: None,
             utf8_replacements: 0,
-            transcript_version: transcript::VERSION,
+            transcript_version,
         };
         storage::write_metadata(&path, &meta)?;
         let mut environment = std::collections::BTreeMap::new();
@@ -241,7 +246,7 @@ pub fn run(config: &Config, command: Vec<String>, capture: bool) -> Result<u32> 
             env: environment,
             termlog: Extension {
                 started_at: started,
-                transcript_version: transcript::VERSION,
+                transcript_version,
             },
         };
         let replacements = Arc::new(AtomicU64::new(0));

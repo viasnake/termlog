@@ -1,7 +1,7 @@
 # termlog
 
 Local terminal recording for macOS and Linux. Saves asciicast v3 recordings and
-searchable, timestamped text. Input capture is off by default; displayed secrets
+searchable text with a time on every line and a date heading. Input capture is off by default; displayed secrets
 are still recorded. Use `--capture-input` to include hidden input, or `--no-capture-input` to override configuration.
 
 ```sh
@@ -9,7 +9,7 @@ cargo install --locked --path .
 termlog shell
 termlog run -- fish -l
 termlog list
-termlog search 'pattern'
+termlog search 'pattern' # --plain for one result per line
 termlog show SESSION
 termlog replay SESSION
 ```
