@@ -1,7 +1,7 @@
 # termlog
 
 Local terminal recording for macOS and Linux. Saves asciicast v3 recordings and
-searchable text with a time on every line and a date heading. Input capture is off by default; displayed secrets
+searchable text with millisecond timestamps on every line and a date heading. Input capture is off by default; displayed secrets
 are still recorded. Use `--capture-input` to include hidden input, or `--no-capture-input` to override configuration.
 
 ```sh
@@ -18,7 +18,8 @@ Set your terminal startup command to the absolute path of `termlog` followed by
 `shell`. Configuration: `$XDG_CONFIG_HOME/termlog/config.toml` (default
 `~/.config/termlog/config.toml`). Recordings: `$XDG_STATE_HOME/termlog` (default
 `~/.local/state/termlog`), under `YYYY-MM-DD/session-UUID/`. Existing logs in the
-older `sessions/YYYY/MM/DD/UUID/` layout remain readable. `termlog --help` lists commands.
+older `sessions/YYYY/MM/DD/UUID/` layout are also discovered. Use `termlog rebuild SESSION`
+to regenerate text from cast, including when metadata is missing. `termlog --help` lists commands.
 
 ```sh
 cargo test --locked

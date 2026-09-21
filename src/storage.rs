@@ -10,7 +10,6 @@ use uuid::Uuid;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Metadata {
-    pub schema_version: u32,
     pub session_id: String,
     pub started_at: DateTime<FixedOffset>,
     pub ended_at: Option<DateTime<FixedOffset>>,
@@ -30,7 +29,6 @@ pub struct Metadata {
     pub transcript_error: Option<String>,
     pub recording_error: Option<String>,
     pub utf8_replacements: u64,
-    pub transcript_version: u32,
 }
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Header {
@@ -51,7 +49,6 @@ pub struct Term {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Extension {
     pub started_at: DateTime<FixedOffset>,
-    pub transcript_version: u32,
 }
 
 pub fn private_dir(path: &Path) -> Result<()> {
@@ -136,7 +133,6 @@ pub fn sessions(root: &Path) -> Result<Vec<PathBuf>> {
             if p.file_name()
                 .is_some_and(|name| name.to_string_lossy().starts_with("session-") == prefixed)
                 && session_id(p).is_ok()
-                && p.join("metadata.json").is_file()
             {
                 out.push(p.into());
             }

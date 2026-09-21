@@ -10,6 +10,7 @@ import resource
 import select
 import signal
 import shutil
+import uuid
 from datetime import datetime
 import struct
 import subprocess
@@ -201,7 +202,7 @@ print("done")'''
         self.assertEqual(target.stat().st_mode&0o777,0o755);self.assertNotIn(b'SHOULD_NOT_RUN',t.data)
     def test_list_uses_started_at(self):
         t=self.run_child('print("ok")');self.assertEqual(t.finish(),0)
-        template=t.metadata();t.path().joinpath('metadata.json').unlink()
+        template=t.metadata();shutil.rmtree(t.path())
         parent=next((self.root/'termlog').glob('????-??-??'))
         ids=['ffffffff-ffff-4fff-8fff-ffffffffffff','00000000-0000-4000-8000-000000000000','aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa']
         for id,time_string in zip(ids,['2026-09-20T01:00:00Z','2026-09-20T23:00:00Z','2026-09-20T22:00:00Z']):
@@ -253,7 +254,7 @@ print("done")'''
         for id,date in zip(ids,['2026-09-20T01:00:00Z','2026-09-20T23:00:00Z','2026-09-20T23:00:00Z']):
             session=path.parent/('session-'+id);session.mkdir()
             (session/'metadata.json').write_text(json.dumps(dict(template,session_id=id,started_at=date)))
-            (session/'transcript.log').write_text('2026-09-20 UTC+00:00\n\n00:00:00  needle\n')
+            (session/'transcript.log').write_text('2026-09-20 UTC+00:00\n\n00:00:00.000  needle\n')
         result=self.cli('search','--plain','needle');self.assertEqual(result.returncode,0,result.stderr)
         self.assertEqual([line.split(':')[0] for line in result.stdout.decode().splitlines()],[ids[1],ids[2],ids[0],path.name.removeprefix('session-')])
         result=self.cli('list');self.assertEqual(result.returncode,0)
@@ -286,9 +287,11 @@ print("done")'''
         rows=original.decode().splitlines()
         self.assertRegex(rows[0],r'^\d{4}-\d{2}-\d{2} UTC[+-]\d{2}:\d{2}$')
         self.assertEqual(rows[1],'')
-        self.assertEqual([row[10:] for row in rows[2:]],['one','two','','  日本語','last'])
-        for row in rows[2:]:self.assertRegex(row,r'^\d{2}:\d{2}:\d{2}  ')
-        self.assertEqual(t.metadata()['transcript_version'],2)
+        self.assertEqual([row[14:] for row in rows[2:]],['one','two','','  日本語','last'])
+        for row in rows[2:]:self.assertRegex(row,r'^\d{2}:\d{2}:\d{2}\.\d{3}  ')
+        self.assertNotIn('transcript_version',t.metadata())
+        self.assertNotIn('schema_version',t.metadata())
+        self.assertNotIn('transcript_version',json.loads((path/'events.cast').read_text().splitlines()[0])['termlog'])
         shown=self.cli('show',path.name.removeprefix('session-'));self.assertEqual(shown.returncode,0,shown.stderr)
         self.assertIn(original,shown.stdout)
         self.assertIn(b'recording=complete transcript=complete',shown.stdout)
@@ -300,30 +303,65 @@ print("done")'''
         self.assertEqual(self.cli('rebuild',path.name.removeprefix('session-')).returncode,0)
         self.assertEqual(original,(path/'transcript.log').read_bytes())
 
-    def test_legacy_rebuild_show_and_search(self):
-        self.config('[transcript]\ntimestamps="rfc3339"\n')
-        t=self.run_child('print("ok")');self.assertEqual(t.finish(),0);path=t.path()
+    def test_millisecond_rebuild_show_and_search(self):
+        t=self.run_child('print("ok")');self.assertEqual(t.finish(),0);path=t.path();id=t.metadata()['session_id']
         header=json.loads((path/'events.cast').read_text().splitlines()[0])
-        self.assertEqual(t.metadata()['transcript_version'],1)
-        self.assertEqual(header['termlog']['transcript_version'],1)
         header['termlog']['started_at']='2026-09-20T23:59:59+09:00'
-        events=[[0,'o','before\r\n'],[2,'o','after\r\n'],[0,'x','0']]
+        events=[[0.123456,'o','before\r\n'],[2.000789,'o','after\r\n'],[0,'x','0']]
         (path/'events.cast').write_text('\n'.join(json.dumps(e) for e in [header,*events])+'\n')
-        metadata=t.metadata();metadata['transcript_version']=1
-        (path/'metadata.json').write_text(json.dumps(metadata))
-        rebuilt=self.cli('rebuild',path.name.removeprefix('session-'));self.assertEqual(rebuilt.returncode,0,rebuilt.stderr)
+        rebuilt=self.cli('rebuild',id);self.assertEqual(rebuilt.returncode,0,rebuilt.stderr)
         original=(path/'transcript.log').read_bytes()
-        self.assertEqual(original,b'2026-09-20T23:59:59.000000+09:00\tbefore\n2026-09-21T00:00:01.000000+09:00\tafter\n')
-        shown=self.cli('show',path.name.removeprefix('session-'));self.assertEqual(shown.returncode,0,shown.stderr)
-        self.assertIn(b'2026-09-20 UTC+09:00\n\n23:59:59  before',shown.stdout)
-        self.assertIn(b'2026-09-21 UTC+09:00\n\n00:00:01  after',shown.stdout)
+        self.assertEqual(original,b'2026-09-20 UTC+09:00\n\n23:59:59.123  before\n\n2026-09-21 UTC+09:00\n\n00:00:01.124  after\n')
+        shown=self.cli('show',id);self.assertEqual(shown.returncode,0,shown.stderr)
+        self.assertIn(original,shown.stdout)
         result=self.cli('search','--plain','after');self.assertEqual(result.returncode,0,result.stderr)
-        self.assertEqual(result.stdout,(path.name.removeprefix('session-')+':2:').encode()+original.splitlines(keepends=True)[1])
+        self.assertEqual(result.stdout,(id+':7:2026-09-21T00:00:01.124+09:00\tafter\n').encode())
         self.assertEqual(original,(path/'transcript.log').read_bytes())
-        metadata['transcript_version']=99
-        (path/'metadata.json').write_text(json.dumps(metadata))
-        self.assertNotEqual(self.cli('show',path.name.removeprefix('session-')).returncode,0)
-        self.assertEqual(self.cli('search','after').returncode,2)
+
+    def test_transcript_cannot_be_disabled(self):
+        for setting in ('enabled=false','enabled=true','timestamps="rfc3339"'):
+            self.config('[transcript]\n'+setting+'\n')
+            result=self.cli('list')
+            self.assertNotEqual(result.returncode,0);self.assertIn(b'unknown field',result.stderr)
+
+    def test_metadata_damage_is_local_and_cast_can_rebuild(self):
+        t=self.run_child('print("recoverable needle")');self.assertEqual(t.finish(),0)
+        path=t.path();original=(path/'transcript.log').read_bytes();good=t.metadata()
+        self.assertEqual(self.cli('search','needle').returncode,0)
+        damaged=[]
+        for kind in ('broken','missing','wrong-id','no-cast','bad-cast'):
+            id=str(uuid.uuid4());copy=path.parent/('session-'+id);shutil.copytree(path,copy)
+            if kind=='broken':(copy/'metadata.json').write_text('broken json')
+            elif kind=='wrong-id':pass
+            else:(copy/'metadata.json').unlink()
+            if kind=='no-cast':(copy/'events.cast').unlink()
+            if kind=='bad-cast':(copy/'events.cast').write_text('broken cast')
+            damaged.append((id,copy,kind))
+        empty_id=str(uuid.uuid4());(path.parent/('session-'+empty_id)).mkdir()
+        result=self.cli('search','--plain','needle')
+        self.assertEqual(result.returncode,2,result.stderr)
+        ids=[line.split(':')[0] for line in result.stdout.decode().splitlines()]
+        self.assertCountEqual(ids,[good['session_id'],*[id for id,_,_ in damaged]])
+        self.assertEqual(self.cli('search','no-matches').returncode,2)
+        listed=self.cli('list');self.assertEqual(listed.returncode,0,listed.stderr)
+        for id in [good['session_id'],empty_id,*[id for id,_,_ in damaged]]:self.assertIn(id.encode(),listed.stdout)
+        self.assertIn(b'recording=unknown transcript=unknown',listed.stdout)
+        for id,copy,kind in damaged:
+            shown=self.cli('show',id);self.assertEqual(shown.returncode,0,shown.stderr)
+            self.assertIn(b'needle',shown.stdout);self.assertIn(id.encode(),shown.stderr)
+            metadata_before=(copy/'metadata.json').read_bytes() if (copy/'metadata.json').exists() else None
+            if kind in ('no-cast','bad-cast'):
+                self.assertNotEqual(self.cli('rebuild',id).returncode,0)
+                self.assertEqual(original,(copy/'transcript.log').read_bytes())
+            else:
+                (copy/'transcript.log').unlink()
+                result=self.cli('rebuild',id);self.assertEqual(result.returncode,0,result.stderr)
+                self.assertEqual(original,(copy/'transcript.log').read_bytes())
+                self.assertIn(b'unknown',result.stderr)
+            metadata_after=(copy/'metadata.json').read_bytes() if (copy/'metadata.json').exists() else None
+            self.assertEqual(metadata_before,metadata_after)
+        self.assertEqual(self.cli('search','needle').returncode,2)
+        self.assertEqual(good,json.loads((path/'metadata.json').read_text()))
 
     def test_new_layout_with_legacy_sessions_and_uuid_resolution(self):
         t=self.run_child('input("layout-ready");print("layout-done")');t.until(b'layout-ready')

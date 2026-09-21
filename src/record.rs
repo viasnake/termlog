@@ -209,10 +209,6 @@ impl CastReader {
         let header: Header = serde_json::from_str(&line).context("invalid cast header")?;
         anyhow::ensure!(header.version == 3, "expected asciicast v3");
         anyhow::ensure!(
-            matches!(header.termlog.transcript_version, 1 | 2),
-            "unsupported transcript version"
-        );
-        anyhow::ensure!(
             header.term.rows > 0 && header.term.cols > 0,
             "invalid terminal dimensions"
         );

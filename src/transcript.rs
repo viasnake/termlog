@@ -3,7 +3,6 @@ use chrono::{DateTime, Duration, FixedOffset};
 use unicode_width::UnicodeWidthChar;
 use vte::{Params, Perform};
 
-pub const VERSION: u32 = 2;
 #[derive(Clone)]
 struct Row {
     cells: Vec<String>,

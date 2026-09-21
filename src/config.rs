@@ -10,7 +10,6 @@ pub struct Config {
     pub flush_interval_ms: u64,
     pub shell: Option<Shell>,
     pub storage: Storage,
-    pub transcript: Transcript,
 }
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -25,22 +24,6 @@ pub struct Storage {
     pub path: Option<PathBuf>,
     pub retention_days: u32,
 }
-#[derive(Debug, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct Transcript {
-    pub enabled: bool,
-    pub timestamps: String,
-    pub strip_terminal_sequences: bool,
-}
-impl Default for Transcript {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            timestamps: "clock".into(),
-            strip_terminal_sequences: true,
-        }
-    }
-}
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -49,7 +32,6 @@ impl Default for Config {
             flush_interval_ms: 1000,
             shell: None,
             storage: Storage::default(),
-            transcript: Transcript::default(),
         }
     }
 }
@@ -78,11 +60,6 @@ impl Config {
         };
         if conf.storage.retention_days != 0 {
             bail!("retention_days must be 0; automatic deletion is not implemented")
-        }
-        if !matches!(conf.transcript.timestamps.as_str(), "clock" | "rfc3339")
-            || !conf.transcript.strip_terminal_sequences
-        {
-            bail!("transcript requires clock or rfc3339 timestamps and terminal sequence normalization")
         }
         if conf.flush_interval_ms > 86_400_000 {
             bail!("flush_interval_ms exceeds one day")

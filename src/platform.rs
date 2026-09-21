@@ -3,7 +3,6 @@ use crate::{
     derive_log,
     record::{Event, Writer},
     storage::{self, Extension, Header, Metadata, Term},
-    transcript,
 };
 use anyhow::{bail, Context, Result};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
@@ -188,11 +187,6 @@ pub fn run(config: &Config, command: Vec<String>, capture: bool) -> Result<u32> 
         return Err(error.into());
     }
     let (notify, updates) = mpsc::sync_channel(1);
-    let transcript_version = if config.transcript.timestamps == "rfc3339" {
-        1
-    } else {
-        transcript::VERSION
-    };
     let prepared = (|| {
         unsafe {
             if libc::isatty(0) != 1 || libc::isatty(1) != 1 {
@@ -208,7 +202,6 @@ pub fn run(config: &Config, command: Vec<String>, capture: bool) -> Result<u32> 
         let term = env::var("TERM").unwrap_or_else(|_| "xterm-256color".into());
         let sz = size();
         let meta = Metadata {
-            schema_version: 2,
             session_id: id.clone(),
             started_at: started,
             ended_at: None,
@@ -227,7 +220,6 @@ pub fn run(config: &Config, command: Vec<String>, capture: bool) -> Result<u32> 
             transcript_error: None,
             recording_error: None,
             utf8_replacements: 0,
-            transcript_version,
         };
         storage::write_metadata(&path, &meta)?;
         let mut environment = std::collections::BTreeMap::new();
@@ -246,7 +238,6 @@ pub fn run(config: &Config, command: Vec<String>, capture: bool) -> Result<u32> 
             env: environment,
             termlog: Extension {
                 started_at: started,
-                transcript_version,
             },
         };
         let replacements = Arc::new(AtomicU64::new(0));
@@ -315,10 +306,7 @@ pub fn run(config: &Config, command: Vec<String>, capture: bool) -> Result<u32> 
         }
         result
     });
-    let derived = config
-        .transcript
-        .enabled
-        .then(|| derive_log::Worker::start(&path, updates));
+    let derived = derive_log::Worker::start(&path, updates);
     let mut transcript_warning = false;
     let mut sender = Some(tx);
     let mut warning = false;
@@ -330,11 +318,7 @@ pub fn run(config: &Config, command: Vec<String>, capture: bool) -> Result<u32> 
     let mut eof = false;
     let relay: Result<()> = (|| {
         loop {
-            if derived
-                .as_ref()
-                .is_some_and(|d| d.failed.load(Ordering::Acquire))
-                && !transcript_warning
-            {
+            if derived.failed.load(Ordering::Acquire) && !transcript_warning {
                 transcript_warning = true;
                 output.write_all(b"\r\nWARNING: transcript generation failed; cast recording continues. Use termlog rebuild after exit.\r\n")?;
                 output.flush()?;
@@ -489,12 +473,10 @@ pub fn run(config: &Config, command: Vec<String>, capture: bool) -> Result<u32> 
         .and_then(|r| r);
     drop(raw);
     let duration = start.elapsed();
-    if let Some(derived) = derived {
-        match derived.finish() {
-            Ok(true) => meta.transcript_complete = true,
-            Ok(false) => meta.transcript_error = Some("cast has no complete exit event".into()),
-            Err(e) => meta.transcript_error = Some(format!("{e:#}")),
-        }
+    match derived.finish() {
+        Ok(true) => meta.transcript_complete = true,
+        Ok(false) => meta.transcript_error = Some("cast has no complete exit event".into()),
+        Err(e) => meta.transcript_error = Some(format!("{e:#}")),
     }
     if let Some(error) = &meta.transcript_error {
         eprintln!("WARNING: transcript incomplete: {error}; run termlog rebuild {id}");

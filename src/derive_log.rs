@@ -55,7 +55,7 @@ fn generate(path: &Path, output: impl Write, updates: Receiver<()>) -> Result<bo
         cast.header.termlog.started_at,
     );
     let mut output = BufWriter::new(output);
-    let mut format = crate::textlog::Format::new(cast.header.termlog.transcript_version);
+    let mut format = crate::textlog::Format::default();
     loop {
         // Sender belongs only to CastWriter. Disconnect means its final flush
         // (including BufWriter's drop on failure) has finished. Drain once more.
@@ -99,7 +99,7 @@ mod tests {
         let header = serde_json::from_value(serde_json::json!({
             "version":3,"term":{"cols":80,"rows":24,"type":"xterm"},
             "timestamp":0,"command":"test","env":{},
-            "termlog":{"started_at":"1970-01-01T00:00:00Z","transcript_version":1}
+            "termlog":{"started_at":"1970-01-01T00:00:00Z"}
         }))
         .unwrap();
         let (notify, updates) = mpsc::sync_channel(1);
@@ -254,7 +254,7 @@ mod tests {
         let worker = Worker::start(dir.path(), updates);
         assert!(worker.finish().unwrap());
         let text = std::fs::read_to_string(dir.path().join("transcript.log")).unwrap();
-        assert_eq!(text.lines().count(), 1001);
+        assert_eq!(text.lines().count(), 1003);
         assert!(text.ends_with("tail\n"));
     }
 }
